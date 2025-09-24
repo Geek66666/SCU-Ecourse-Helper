@@ -1,0 +1,176 @@
+// 保存原始的XMLHttpRequest
+const originalXHROpen = XMLHttpRequest.prototype.open;
+const originalXHRSend = XMLHttpRequest.prototype.send;
+// 存储抓取到的参数
+let capturedParams = {
+    courseId: null,
+    resourceId: null
+};
+// 是否已经获取到参数
+let paramsCaptured = false;
+// 计数器，用于每10次运行一次脚本二
+let requestCounter = 0;
+// 存储定时器ID，用于停止程序
+let intervalId = null;
+
+// 监听网络请求
+XMLHttpRequest.prototype.open = function(method, url) {
+    this._url = url;
+    return originalXHROpen.apply(this, arguments);
+};
+
+XMLHttpRequest.prototype.send = function(data) {
+    if (this._url && this._url.includes('/learn/v1/statistics/course/learntime') && !paramsCaptured) {
+        try {
+            // 尝试解析请求体
+            if (data) {
+                const requestData = JSON.parse(data);
+                if (requestData.courseId && requestData.resourceId) {
+                    capturedParams.courseId = requestData.courseId;
+                    capturedParams.resourceId = requestData.resourceId;
+                    paramsCaptured = true;
+                    console.log('成功抓取到参数:', capturedParams);
+                    
+                    // 恢复原始XMLHttpRequest
+                    XMLHttpRequest.prototype.open = originalXHROpen;
+                    XMLHttpRequest.prototype.send = originalXHRSend;
+                    
+                    // 立即开始发送请求
+                    startSendingRequests();
+                }
+            }
+        } catch (e) {
+            console.log('解析请求体失败，继续监听...');
+        }
+    }
+    return originalXHRSend.apply(this, arguments);
+};
+
+console.log('开始监听网络请求，等待抓取courseId和resourceId...');
+
+// 脚本二的功能：更新学习状态
+function updateLearnStatus() {
+    try {
+        // 从页面访问Vue主应用实例
+        const app = document.getElementById('app').__vue__;
+        
+        // 验证用户是否已登录，且学习状态是否已加载
+        if (app && app.hasLogin && app.learnStatus) {
+            // 为API请求准备数据以更新状态
+            const params = {
+                // 如果学习记录已有ID，则使用该ID
+                id: app.learnStatus.id,
+                courseId: app.courseId,
+                courseType: app.theCourseInfo.entityData.courseType,
+                subsectionId: app.courseInfo.guid_,
+                resourceType: app.courseInfo.resourse_type,
+                courseSemester: app.theCourseInfo.entityData.course_semester_id,
+                userCode: app.loginUserInfo.user_code,
+                // 将状态设置为2，表示“已完成”
+                status: 2,
+                // 将最后记录的学习时间发送回服务器，以保持其不变
+                studyTotalTime: app.lastTotalWatchTime || 0
+            };
+            
+            // 调用网站的内部API以更新状态
+            return API.reqCreateOrUpdateLearnStatus(params).then((res) => {
+                if (res.status == 200) {
+                    // 如果更新成功，请在页面上更改状态
+                    app.learnStatus.status = 2;
+                    // 强制刷新用户界面并显示更新后的状态
+                    app.$forceUpdate();
+                    console.log("成功：该课程部分已标记为完成");
+                    return "success";
+                } else {
+                    console.error("更新学习状态失败：", res.message);
+                    return "failed";
+                }
+            }).catch(err => {
+                console.error("调用API时出错：", err);
+                return "error";
+            });
+        } else {
+            console.error("无法执行。请确保您已登录且页面已完全加载");
+            return Promise.resolve("not_ready");
+        }
+    } catch (err) {
+        console.error("访问 Vue 应用时出错：", err);
+        return Promise.resolve("error");
+    }
+}
+
+// 发送POST请求的函数（脚本一的功能）
+function sendLearnTimeRequest() {
+    const requestData = {
+        "courseId": capturedParams.courseId,
+        "timeInterval": 6000,
+        // 一次POST增加的学习时间，不宜调的太大
+        "courseType": 1,
+        "resourceId": capturedParams.resourceId,
+        "courseSemester": 1
+    };
+    
+    fetch('https://ecourse.scu.edu.cn/learn/v1/statistics/course/learntime', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': navigator.userAgent,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Referer': 'https://ecourse.scu.edu.cn/'
+        },
+        body: JSON.stringify(requestData),
+        credentials: 'include'
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        return response.json();
+    })
+    .then(data => {
+        console.log('请求发送成功:', data);
+        
+        // 增加计数器
+        requestCounter++;
+        
+        // 每20次运行一次脚本二
+        if (requestCounter % 20 === 0) {
+            console.log(`运行第${requestCounter}次请求，执行状态更新...`);
+            updateLearnStatus().then(result => {
+                // 如果脚本二返回success，终止所有程序
+                if (result === "success") {
+                    console.log("检测到成功更新状态，终止所有程序...");
+                    stopAutoRequest();
+                }
+            });
+        }
+    })
+    .catch(error => {
+        console.error('请求发送失败:', error);
+    });
+}
+
+// 开始发送请求的函数
+function startSendingRequests() {
+    console.log('开始自动发送请求...');
+    
+    // 立即发送第一次请求
+    sendLearnTimeRequest();
+    
+    // 设置定时器，每3秒发送一次
+    intervalId = setInterval(sendLearnTimeRequest, 3000);//可自行修改，单位毫秒
+    
+    // 提供停止功能
+    window.stopAutoRequest = function() {
+        if (intervalId) {
+            clearInterval(intervalId);
+            intervalId = null;
+            console.log('已停止自动发送请求');
+        }
+    };
+    
+    console.log('脚本已启动，将自动发送请求');
+    console.log('使用 stopAutoRequest() 可以停止自动发送');
+    console.log('免责声明：仅供学习使用，请勿用于非法用途，任何使用本程序造成的后果与本人无关QAQ');
+}
